@@ -8,8 +8,6 @@ load_dotenv(dotenv_path=env_path)
 
 
 # ── Healthy Budget Benchmarks ────────────────────────────────────────────────
-# These are the ideal percentage ranges for each spending category
-# Based on established financial planning guidelines
 
 INDIA_BENCHMARKS = {
     "rent":          {"ideal": 25, "warning": 35, "critical": 45},
@@ -50,32 +48,26 @@ def detect_anomalies(spending: dict, monthly_income: float, country: str) -> lis
     benchmarks = INDIA_BENCHMARKS if country == "india" else US_BENCHMARKS
     currency = "₹" if country == "india" else "$"
 
-    # Convert spending to percentages of income
     spending_percentages = {}
     for category, amount in spending.items():
         spending_percentages[category] = round((amount / monthly_income) * 100, 2)
 
-    # Prepare data for Isolation Forest
-    # We use deviation from benchmark as the feature
     deviations = []
     categories = []
 
     for category, percentage in spending_percentages.items():
         if category in benchmarks:
             ideal = benchmarks[category]["ideal"]
-            # For savings/investments, negative deviation is bad
             if category in ["savings", "investments"]:
-                deviation = ideal - percentage  # positive = underspending (bad)
+                deviation = ideal - percentage
             else:
-                deviation = percentage - ideal  # positive = overspending (bad)
+                deviation = percentage - ideal
             deviations.append([deviation])
             categories.append(category)
 
     if not deviations:
         return []
 
-    # Run Isolation Forest
-    # contamination=0.3 means we expect ~30% of categories to be anomalous
     iso_forest = IsolationForest(
         contamination=0.3,
         random_state=42,
@@ -84,15 +76,13 @@ def detect_anomalies(spending: dict, monthly_income: float, country: str) -> lis
     predictions = iso_forest.fit_predict(deviations)
     scores = iso_forest.score_samples(deviations)
 
-    # Build results
     results = []
     for i, category in enumerate(categories):
         amount = spending.get(category, 0)
         percentage = spending_percentages.get(category, 0)
         benchmark = benchmarks[category]
-        is_anomalous = predictions[i] == -1  # -1 means anomaly in Isolation Forest
+        is_anomalous = predictions[i] == -1
 
-        # Determine verdict based on benchmark thresholds
         if category in ["savings", "investments"]:
             if percentage >= benchmark["ideal"]:
                 verdict = "healthy"
@@ -119,34 +109,67 @@ def detect_anomalies(spending: dict, monthly_income: float, country: str) -> lis
             "currency": currency
         })
 
-    # Sort — worst anomalies first
     results.sort(key=lambda x: (x["verdict"] == "critical", x["is_anomalous"]), reverse=True)
-
     return results
 
 
 # ── Quick test ───────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    # Test with a bad budget
-    test_spending = {
+
+    # ── India Test ───────────────────────────────────────────────────────────
+    test_spending_india = {
         "rent": 15000,
         "food": 5000,
-        "dining_out": 8000,    # too high
+        "dining_out": 8000,
         "transport": 3000,
-        "entertainment": 4000, # too high
-        "subscriptions": 3000, # too high
-        "shopping": 6000,      # too high
+        "entertainment": 4000,
+        "subscriptions": 3000,
+        "shopping": 6000,
         "health": 1000,
         "education": 1000,
-        "savings": 2000,       # too low
-        "investments": 0,      # critical
+        "savings": 2000,
+        "investments": 0,
         "other": 2000
     }
-    monthly_income = 50000
 
-    print("Testing anomaly detection (India, ₹50,000 income)...")
-    results = detect_anomalies(test_spending, monthly_income, "india")
-
-    for r in results:
+    print("=" * 50)
+    print("INDIA TEST — ₹50,000 monthly income")
+    print("=" * 50)
+    results_india = detect_anomalies(test_spending_india, 50000, "india")
+    for r in results_india:
         status = "🔴" if r["verdict"] == "critical" else "🟡" if r["verdict"] == "warning" else "🟢"
         print(f"{status} {r['category']}: ₹{r['amount']:,} ({r['percentage_of_income']}% vs {r['benchmark_percentage']}% ideal) — {r['verdict']}")
+
+    critical_india = len([r for r in results_india if r["verdict"] == "critical"])
+    warning_india = len([r for r in results_india if r["verdict"] == "warning"])
+    healthy_india = len([r for r in results_india if r["verdict"] == "healthy"])
+    print(f"\nSummary: 🔴 {critical_india} critical | 🟡 {warning_india} warnings | 🟢 {healthy_india} healthy")
+
+    # ── US Test ──────────────────────────────────────────────────────────────
+    test_spending_us = {
+        "rent": 1800,
+        "food": 400,
+        "dining_out": 600,
+        "transport": 500,
+        "entertainment": 300,
+        "subscriptions": 200,
+        "shopping": 400,
+        "health": 200,
+        "education": 100,
+        "savings": 100,
+        "investments": 0,
+        "other": 150
+    }
+
+    print("\n" + "=" * 50)
+    print("US TEST — $5,000 monthly income")
+    print("=" * 50)
+    results_us = detect_anomalies(test_spending_us, 5000, "us")
+    for r in results_us:
+        status = "🔴" if r["verdict"] == "critical" else "🟡" if r["verdict"] == "warning" else "🟢"
+        print(f"{status} {r['category']}: ${r['amount']:,} ({r['percentage_of_income']}% vs {r['benchmark_percentage']}% ideal) — {r['verdict']}")
+
+    critical_us = len([r for r in results_us if r["verdict"] == "critical"])
+    warning_us = len([r for r in results_us if r["verdict"] == "warning"])
+    healthy_us = len([r for r in results_us if r["verdict"] == "healthy"])
+    print(f"\nSummary: 🔴 {critical_us} critical | 🟡 {warning_us} warnings | 🟢 {healthy_us} healthy")
