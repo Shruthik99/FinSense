@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 from dotenv import load_dotenv
 from datetime import datetime
+import time
 
 env_path = Path(__file__).resolve().parent.parent.parent / ".env"
 load_dotenv(dotenv_path=env_path)
@@ -14,15 +15,76 @@ from agent.state import AgentState
 from mcp_tools.market_data import get_market_data
 from mcp_tools.inflation import get_inflation
 from mcp_tools.news import get_financial_news
-from mcp_tools.calculator import generate_projections, calculate_ppf_returns
+from mcp_tools.calculator import generate_projections
 from mcp_tools.tax_estimator import get_tax_estimate
 from ml.anomaly_detector import detect_anomalies
 from ml.health_score import compute_health_score
 
-import google.generativeai as genai
+from groq import Groq
+from google import genai
 
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-model = genai.GenerativeModel("gemini-1.5-flash")
+# ── Smart LLM Client — Groq primary, Gemini fallback ─────────────────────────
+
+groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+gemini_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+
+
+class SmartLLMClient:
+    """
+    Uses Groq as primary LLM — fast, generous free tier (14,400 req/day).
+    Automatically falls back to Gemini if Groq hits rate limits.
+    This ensures the app never goes down due to quota issues.
+    """
+
+    def generate(self, prompt: str, max_tokens: int = 1000) -> str:
+        # ── Try Groq first ───────────────────────────────────────────────────
+        try:
+            response = groq_client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=max_tokens,
+                temperature=0.7
+            )
+            return response.choices[0].message.content
+
+        except Exception as e:
+            error_str = str(e)
+
+            if "429" in error_str or "rate" in error_str.lower() or "quota" in error_str.lower():
+                print("  ⚠️ Groq quota hit — falling back to Gemini...")
+                time.sleep(2)
+
+                # ── Fall back to Gemini ──────────────────────────────────────
+                try:
+                    gemini_response = gemini_client.models.generate_content(
+                        model="gemini-2.0-flash",
+                        contents=prompt
+                    )
+                    return gemini_response.text
+
+                except Exception as gemini_error:
+                    gemini_error_str = str(gemini_error)
+                    if "429" in gemini_error_str or "RESOURCE_EXHAUSTED" in gemini_error_str:
+                        print("  ⚠️ Gemini quota hit too — waiting 60 seconds...")
+                        time.sleep(60)
+                        # One final retry with Groq
+                        try:
+                            retry_response = groq_client.chat.completions.create(
+                                model="llama-3.3-70b-versatile",
+                                messages=[{"role": "user", "content": prompt}],
+                                max_tokens=max_tokens,
+                                temperature=0.7
+                            )
+                            return retry_response.choices[0].message.content
+                        except Exception:
+                            return "Unable to generate response — quota exceeded. Please try again in a few minutes."
+                    raise gemini_error
+
+            raise e
+
+
+# Single instance used across all nodes
+smart_client = SmartLLMClient()
 
 
 def add_step(state: AgentState, step_name: str, detail: str = "") -> list:
@@ -50,10 +112,7 @@ def node_analyze_spending(state: AgentState) -> AgentState:
     monthly_income = state["monthly_income"]
     country = state["country"]
 
-    # Run anomaly detection
     anomalies = detect_anomalies(spending, monthly_income, country)
-
-    # Compute health score
     health_result = compute_health_score(spending, monthly_income, anomalies, country)
 
     steps = add_step(
@@ -83,13 +142,11 @@ def node_fetch_live_data(state: AgentState) -> AgentState:
     monthly_income = state["monthly_income"]
     annual_income = monthly_income * 12
 
-    # Fetch all live data
     inflation_data = get_inflation(country)
     market_data = get_market_data(country)
     news_articles = get_financial_news(country, max_articles=5)
     tax_estimate = get_tax_estimate(country, annual_income)
 
-    # Calculate investment projections
     spending = state["spending"]
     total_spending = sum(v for k, v in spending.items()
                         if k not in ["savings", "investments"])
@@ -118,7 +175,6 @@ def node_fetch_live_data(state: AgentState) -> AgentState:
 def node_retrieve_knowledge(state: AgentState) -> AgentState:
     """
     Searches the RAG knowledge base for relevant financial guidance.
-    Retrieves passages based on the user's anomalies and country.
     """
     print("Node 3: Retrieving financial knowledge...")
 
@@ -127,7 +183,6 @@ def node_retrieve_knowledge(state: AgentState) -> AgentState:
         anomalies = state["anomalies"]
         country = state["country"]
 
-        # Build query from the worst anomalies
         anomalous = [a for a in anomalies if a["is_anomalous"]]
         if anomalous:
             worst = sorted(anomalous, key=lambda x: x["anomaly_score"], reverse=True)[:3]
@@ -146,15 +201,14 @@ def node_retrieve_knowledge(state: AgentState) -> AgentState:
         return {**state, "retrieved_knowledge": knowledge, "steps": steps}
 
     except Exception as e:
-        # RAG not built yet — continue without it
-        steps = add_step(state, "Knowledge retrieval", "Skipped — knowledge base not built yet")
+        steps = add_step(state, "Knowledge retrieval", f"Error: {str(e)}")
         return {**state, "retrieved_knowledge": [], "steps": steps}
 
 
 # ── Node 4: Generate Roast ───────────────────────────────────────────────────
 def node_generate_roast(state: AgentState) -> AgentState:
     """
-    Uses Gemini to generate a brutally honest, funny roast
+    Uses LLM to generate a brutally honest, funny roast
     based on the user's actual spending anomalies and data.
     """
     print("Node 4: Generating roast...")
@@ -168,7 +222,6 @@ def node_generate_roast(state: AgentState) -> AgentState:
     language = state["language"]
     currency = "₹" if country == "india" else "$"
 
-    # Find the worst spending categories
     anomalous = [a for a in anomalies if a["is_anomalous"]]
     anomaly_text = "\n".join([
         f"- {a['category']}: {currency}{a['amount']:,}/month "
@@ -200,8 +253,7 @@ Write a roast (150-200 words) that:
 
 Be specific to their numbers. Do not be generic."""
 
-    response = model.generate_content(prompt)
-    roast = response.text
+    roast = smart_client.generate(prompt, max_tokens=500)
 
     steps = add_step(state, "Generating your financial roast", "Roast generated successfully")
 
@@ -212,7 +264,6 @@ Be specific to their numbers. Do not be generic."""
 def node_generate_coach_plan(state: AgentState) -> AgentState:
     """
     Generates a serious, actionable financial coach plan.
-    Uses all fetched data to create personalized advice.
     """
     print("Node 5: Generating coach plan...")
 
@@ -227,14 +278,12 @@ def node_generate_coach_plan(state: AgentState) -> AgentState:
     currency = "₹" if country == "india" else "$"
     framework = "40/30/30" if country == "india" else "50/30/20"
 
-    # Build projection summary
     proj_data = projections.get("projections", {})
     proj_summary = "\n".join([
         f"- {k.replace('_', ' ').title()}: {currency}{v.get('future_value', 0):,.0f}"
         for k, v in proj_data.items()
     ]) if proj_data else "Projections unavailable"
 
-    # Build knowledge context
     knowledge_context = "\n".join([
         f"- {k.get('content', '')[:200]}"
         for k in knowledge[:3]
@@ -267,10 +316,8 @@ Write a Coach Plan (250-300 words) with these sections:
 
 Be specific with numbers. Cite the framework. Make it feel achievable."""
 
-    response = model.generate_content(prompt)
-    coach_plan = response.text
+    coach_plan = smart_client.generate(prompt, max_tokens=800)
 
-    # Build rebuilt budget
     if country == "india":
         rebuilt_budget = {
             "needs": round(monthly_income * 0.40, 2),
