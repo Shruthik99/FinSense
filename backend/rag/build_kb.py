@@ -43,7 +43,7 @@ INDIA_WIKIPEDIA_TOPICS = [
 ]
 
 INVESTOPEDIA_URLS = [
-    # ── Original working ones ────────────────────────────────────────────────
+    # ── URLs ────────────────────────────────────────────────────────────────
     {"url": "https://www.investopedia.com/terms/i/indexfund.asp",
      "country": "us", "title": "Index Fund Explained"},
     {"url": "https://www.investopedia.com/terms/r/rothira.asp",
@@ -76,8 +76,6 @@ INVESTOPEDIA_URLS = [
      "country": "us", "title": "Four Percent Retirement Rule"},
     {"url": "https://www.investopedia.com/terms/s/savings-rate.asp",
      "country": "both", "title": "Savings Rate Guide"},
-
-    # ── Replacement URLs for previously blocked ones ──────────────────────
     {"url": "https://www.investopedia.com/terms/s/systematic-investment-plan.asp",
      "country": "india", "title": "Systematic Investment Plan"},
     {"url": "https://www.investopedia.com/terms/e/emergency_fund.asp",
